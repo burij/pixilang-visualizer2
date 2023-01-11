@@ -1,0 +1,686 @@
+// pixilang-based music visualizer
+// by acheney (with help from nightradio, silent broadcast, and others)
+// under mit license 
+
+include "demo.pixi"
+
+// - CONFIG BEGIN -
+
+// -- DEMO LIB CONFIG --
+
+// demo width in pixels
+demo_xsize = 1920
+
+// demo height in pixels
+demo_ysize = 1080
+
+// demo use opengl
+demo_opengl = 1
+
+// demo video export filename, comment it out if you don't want to export
+//demo_video_export = "video.mkv"
+
+// demo video export fps (frames per second)
+demo_video_export_fps = 60
+
+// demo video export quality (0 - 100)
+demo_video_export_q = 100
+
+// -- TEXT CONFIG --
+
+// text (song title, song artist, song release title)
+text_title = "song title"
+text_artist = "song artist"
+text_release = "song release title"
+
+// text distance scaling (0 - 1)
+text_scale = 0.25
+
+// -- SPECTRUM/VISUALIZER CONFIG --
+
+// goertzel size
+vis_size = 2048
+
+// visualizer color
+vis_color = #FFFFFF
+
+// linear visualizer (only enabled when 1, logarithmic when 0)
+vis_linear = 1
+
+// visualizer linear interpolation (only enabled when 1, bars when 0)
+vis_int = 0
+
+// visualizer number of bars
+vis_bars = 100
+
+// visualizer bar width factor ( 0 - 1 )
+vis_bar_width = 0.5
+
+// linear visualizer minimum frequency (hz)
+vis_min_freq = 20
+
+// linear visualizer maximum frequency (hz)
+vis_max_freq = 3000
+
+// logarithmic visualizer minimum midi pitch
+vis_min_pitch = 15
+
+// logarithmic visualizer maximum midi pitch
+vis_max_pitch = 102
+
+// visualizer smoothing factor ( >= 1 )
+vis_smooth = 1.5
+
+// visualizer vertical scale
+vis_scale = 50
+
+// -- TIME CONFIG --
+
+// time for fade to black
+all_exit = 6000
+
+// time for logo + artist + blur transitions
+all_enter = 6000
+
+// -- LOGO CONFIG --
+
+// logo size scale ( % of image size )
+logo_scale = 0.25
+
+// logo size scale ( persistent bottom-right corner ) ( % of demo_xsize )
+logo_scale_persistent = 0.075
+
+// -- ARTIST CONFIG --
+
+// artist size scale  ( % of image size )
+artist_scale = 0.25
+
+// -- COVER CONFIG --
+
+// cover gaussian blur radius
+cover_blur_rad = 20
+
+// cover brightness scale ( 0 - 1 )
+cover_brightness = 0.5
+
+//cover scale ( persistent top-right corner ) ( % of demo_xsize )
+cover_scale = 0.075
+
+// cover flash speed ( 0 - 1 )
+cover_flash_speed = 0.75
+
+// - END CONFIG - 
+
+demo_load_wav( "media/song.wav" )
+cover = load( "media/cover.png" )
+logo = load("media/logo.png")
+artist = load("media/artist.png")
+
+set_flags( cover, CFLAG_INTERP )
+
+demo_length = 0
+
+goertzel_values = new( vis_bars, 1, FLOAT )
+
+cover_xsize = get_xsize(cover)
+cover_ysize = get_ysize(cover)
+cover_size = cover_xsize * cover_ysize
+cover_src = clone(cover)
+
+logo_xsize = get_xsize(logo)
+logo_ysize = get_ysize(logo)
+
+corner_x = -demo_xsize / 2
+corner_y = -demo_ysize / 2
+
+logo_xsize = get_xsize(logo)
+logo_ysize = get_ysize(logo)
+
+artist_xsize = get_xsize(artist)
+artist_ysize = get_ysize(artist)
+
+demo_init()
+custom_init()
+
+demo_add_scene( 0, 0, 0, view )
+demo_add_scene( 0, 0, demo_length, DEMO_STOP )
+
+demo_play()
+custom_deinit()
+demo_deinit()
+
+fn view( $t1, $t2, $len )
+{
+	clear( #000000 )
+
+	bg_render( $t1 )
+	vis_render( $t1 )
+	cover_render( $t1 )
+	logo_render( $t1 )
+	text_render( $t1 )
+
+	screen_blur( $t1 )
+
+	logos_render( $t1 )
+	black( $t1 )
+	
+	transp( 255 )
+}
+
+fn vis_render( $t1 )
+{
+
+	if ( vis_linear ) {
+
+		if ( vis_int ) {
+
+			freq_range = vis_max_freq - vis_min_freq
+
+			freq_unit = freq_range / vis_bars
+
+			bar_space = demo_xsize / vis_bars
+
+			i = 0 while i < vis_bars {
+
+				i_freq = ( freq_unit * i ) + vis_min_freq
+
+				k = ( 0.5 + ( ( vis_size * i_freq ) / demo_sound_rate ) )
+
+				real_w = 2 * cos( 2 * M_PI * k / vis_size )
+				imag_w = sin( 2 * M_PI * k / vis_size )
+
+				d1 = 0
+				d2 = 0
+
+				j = 0 while j < vis_size {
+				
+					j = j + 1
+
+					v = demo_sound_pcm_stream[ ( demo_sound_pcm_stream_ptr + j ) * demo_sound_channels ] / 256
+					win = sin( M_PI * j / vis_size )
+					x = v * win
+					
+					y = ( x * vis_size ) + real_w * d1 - d2
+					d2 = d1
+					d1 = y	
+
+				}
+					
+				result_r = 0.5 * real_w * d1 - d2
+				result_i = imag_w * d1
+
+				amp = result_r * result_r + result_i * result_i
+				amp = sqrt( amp )
+
+				old_amp = goertzel_values[ i ]
+
+				goertzel_values[ i ] = old_amp + ( amp - old_amp ) * ( 1 / vis_smooth )
+
+				amp_scaled = ( goertzel_values[ i ] / 500 ) * vis_scale
+
+				goertzel_values[ i ] = amp_scaled
+
+				i = i + 1
+
+			}
+
+			i = 0 while i < demo_xsize {
+
+				bin = ( i / demo_xsize ) * vis_bars
+				idx = floor( bin )
+				frac = bin - idx
+				amp = ( 1 - frac ) * goertzel_values[ idx ] + frac * goertzel_values[ idx + 1 ]
+				
+				i_adjusted = i - ( demo_xsize / 2 )
+	   			line( i_adjusted, 0, i_adjusted, amp, vis_color )
+				line( i_adjusted, 0, i_adjusted, -amp, vis_color )
+
+				i = i + 1
+
+			}
+
+		} else {
+
+			freq_range = vis_max_freq - vis_min_freq
+
+			freq_unit = freq_range / vis_bars
+
+			bar_space = demo_xsize / vis_bars
+
+			i = 0 while i < vis_bars {
+
+				i_freq = ( freq_unit * i ) + vis_min_freq
+
+				k = ( 0.5 + ( ( vis_size * i_freq ) / demo_sound_rate ) )
+
+				real_w = 2 * cos( 2 * M_PI * k / vis_size )
+				imag_w = sin( 2 * M_PI * k / vis_size )
+
+				d1 = 0
+				d2 = 0
+
+				j = 0 while j < vis_size {
+				
+					j = j + 1
+
+					v = demo_sound_pcm_stream[ ( demo_sound_pcm_stream_ptr + j ) * demo_sound_channels ] / 256
+					win = sin( M_PI * j / vis_size )
+					x = v * win
+					
+					y = ( x * vis_size ) + real_w * d1 - d2
+					d2 = d1
+					d1 = y	
+
+				}
+					
+				result_r = 0.5 * real_w * d1 - d2
+				result_i = imag_w * d1
+
+				amp = result_r * result_r + result_i * result_i
+				amp = sqrt( amp )
+				
+				old_amp = goertzel_values[ i ]
+
+				goertzel_values[ i ] = old_amp + ( amp - old_amp ) * ( 1 / vis_smooth )
+
+				amp_scaled = ( goertzel_values[ i ] / 500 ) * vis_scale
+
+				fbox( ( -demo_xsize / 2 ) + ( bar_space * i ), -amp_scaled, bar_space * vis_bar_width, amp_scaled, WHITE )
+				fbox( ( -demo_xsize / 2 ) + ( bar_space * i ), 0, bar_space * vis_bar_width, amp_scaled, WHITE )
+
+				i = i + 1
+
+			}
+
+		}
+
+	} else {
+		
+		if (vis_int) {
+
+			pitch_range = vis_max_pitch - vis_min_pitch
+			
+			pitch_unit = pitch_range / vis_bars
+
+			bar_space = demo_xsize / vis_bars
+
+			i = 0 while i < vis_bars {
+
+				i_pitch = ( pitch_unit * i ) + vis_min_pitch
+
+				i_freq = pow( 2, i_pitch / 12) * 8.175799
+
+				k = ( 0.5 + ( ( vis_size * i_freq ) / demo_sound_rate ) )
+
+				real_w = 2 * cos( 2 * M_PI * k / vis_size )
+				imag_w = sin( 2 * M_PI * k / vis_size )
+
+				d1 = 0
+				d2 = 0
+
+				j = 0 while j < vis_size {
+				
+					j = j + 1
+
+					v = demo_sound_pcm_stream[ ( demo_sound_pcm_stream_ptr + j ) * demo_sound_channels ] / 256
+					win = sin( M_PI * j / vis_size )
+					x = v * win
+					
+					y = ( x * vis_size ) + real_w * d1 - d2
+					d2 = d1
+					d1 = y	
+
+				}
+					
+				result_r = 0.5 * real_w * d1 - d2
+				result_i = imag_w * d1
+
+				amp = result_r * result_r + result_i * result_i
+				amp = sqrt( amp )
+
+				old_amp = goertzel_values[ i ]
+
+				goertzel_values[ i ] = old_amp + ( amp - old_amp ) * ( 1 / vis_smooth )
+
+				amp_scaled = ( goertzel_values[ i ] / 500 ) * vis_scale
+
+				goertzel_values[ i ] = amp_scaled
+
+				i = i + 1
+
+			}
+
+			i = 0 while i < demo_xsize {
+
+				bin = ( i / demo_xsize ) * vis_bars
+				idx = floor( bin )
+				frac = bin - idx
+				amp = ( 1 - frac ) * goertzel_values[ idx ] + frac * goertzel_values[ idx + 1 ]
+				
+				i_adjusted = i - ( demo_xsize / 2 )
+	   			line( i_adjusted, 0, i_adjusted, amp, vis_color )
+				line( i_adjusted, 0, i_adjusted, -amp, vis_color )
+
+				i = i + 1
+
+			}
+
+		} else {
+
+			pitch_range = vis_max_pitch - vis_min_pitch
+			
+			pitch_unit = pitch_range / vis_bars
+
+			bar_space = demo_xsize / vis_bars
+
+			i = 0 while i < vis_bars {
+
+				i_pitch = ( pitch_unit * i ) + vis_min_pitch
+
+				i_freq = pow( 2, i_pitch / 12) * 8.175799
+
+				k = ( 0.5 + ( ( vis_size * i_freq ) / demo_sound_rate ) )
+
+				real_w = 2 * cos( 2 * M_PI * k / vis_size )
+				imag_w = sin( 2 * M_PI * k / vis_size )
+
+				d1 = 0
+				d2 = 0
+
+				j = 0 while j < vis_size {
+				
+					j = j + 1
+
+					v = demo_sound_pcm_stream[ ( demo_sound_pcm_stream_ptr + j ) * demo_sound_channels ] / 256
+					win = sin( M_PI * j / vis_size )
+					x = v * win
+					
+					y = ( x * vis_size ) + real_w * d1 - d2
+					d2 = d1
+					d1 = y	
+
+				}
+					
+				result_r = 0.5 * real_w * d1 - d2
+				result_i = imag_w * d1
+
+				amp = result_r * result_r + result_i * result_i
+				amp = sqrt( amp )
+
+				old_amp = goertzel_values[ i ]
+
+				goertzel_values[ i ] = old_amp + ( amp - old_amp ) * ( 1 / vis_smooth )
+
+				amp_scaled = ( goertzel_values[ i ] / 500 ) * vis_scale
+
+				fbox( ( -demo_xsize / 2 ) + ( bar_space * i ), -amp_scaled, bar_space * vis_bar_width, amp_scaled, WHITE )
+				fbox( ( -demo_xsize / 2 ) + ( bar_space * i ), 0, bar_space * vis_bar_width, amp_scaled, WHITE )
+
+				i = i + 1
+
+			}
+
+		}
+
+	}
+
+}
+
+fn bg_render($t1) {
+
+	base = 255 * cover_brightness
+
+	sample = ( abs( demo_sound_pcm_stream[ demo_sound_pcm_stream_ptr * demo_sound_channels ] ) + 0.5 )
+
+	old_flash = flash
+
+	flash = base * sample
+
+	flash = old_flash * ( 1 - cover_flash_speed ) + flash * cover_flash_speed
+
+	shake_x_func = sin( 0.6 * ( $t1 / 1000 ) ) + sin( 2.65 * ( $t1 / 1000 ) ) + sin( 3.7 * ( $t1 / 1000 ) ) * 3
+	shake_y_func = sin( 0.4 * ( $t1 / 1000 ) ) + sin( 1.45 * ( $t1 / 1000 ) ) + sin( 4.5 * ( $t1 / 1000 ) ) * 3
+
+	pixi(cover, shake_x_func , shake_y_func , get_color(flash, flash, flash), ((demo_xsize / cover_xsize)) * 1.1, ((demo_xsize / cover_xsize)) * 1.1)
+
+}
+
+fn logos_render($t1) {
+
+	y_pos = smooth_staircase( ( ( $t1 / ( all_enter / 3 ) ) - 1 ), 1, 15, 1, -0.5 ) * ( all_enter / 3 )
+	
+	pixi(artist, 0, -y_pos, WHITE, logo_scale, logo_scale)
+	pixi(logo, 0, -y_pos + ( all_enter / 3 ), WHITE, logo_scale, logo_scale)
+
+}
+
+fn logo_render($t1) {
+
+	rel_time = 1 - clip( max( $t1 - ( all_enter + 2000 ) , 0 ) / 1000 )
+
+	enter_func = ( pow( 50, rel_time ) - 1 ) / ( 50 - 1 )
+
+	enter_func_adjusted = ( 1 - enter_func ) * ( demo_ysize / 2 )
+
+	if (logo_xsize > logo_ysize) {
+
+		logo_adjust_factor = demo_xsize / logo_ysize
+
+		x_pos = corner_x - ( ( logo_ysize * logo_adjust_factor * logo_scale_persistent ) / 2 ) - demo_xsize / 50
+		y_pos = corner_y - ( ( logo_ysize * logo_adjust_factor *logo_scale_persistent ) / 2 ) + demo_xsize / 50 + ( ( demo_ysize / 2 ) - enter_func_adjusted )
+		x_scale = logo_adjust_factor * logo_scale_persistent
+		y_scale = logo_adjust_factor * logo_scale_persistent
+		
+		pixi( logo, x_pos , y_pos, WHITE, x_scale, y_scale, ( ( logo_xsize - logo_ysize ) / 2 ), 0, logo_ysize, logo_ysize )
+
+	} else {
+
+		logo_adjust_factor = demo_xsize / logo_xsize
+
+		x_pos = -corner_x - ( ( logo_xsize * logo_adjust_factor * logo_scale_persistent ) / 2 ) - demo_xsize / 50
+		y_pos = -corner_y - ( ( logo_xsize * logo_adjust_factor * logo_scale_persistent ) / 2 ) - demo_xsize / 50 + ( ( demo_ysize / 2 ) - enter_func_adjusted )
+		x_scale = logo_adjust_factor * logo_scale_persistent
+		y_scale = logo_adjust_factor * logo_scale_persistent
+	
+		pixi( logo, x_pos , y_pos, WHITE, x_scale, y_scale, ( ( logo_ysize - logo_xsize ) / 2 ), 0, logo_xsize, logo_xsize )
+
+	}
+
+}
+
+fn cover_render( $t1 ) {
+
+	rel_time = 1 - clip( max( $t1 - ( all_enter + 1000 ) , 0 ) / 1000 )
+
+	enter_func = ( pow( 50, rel_time ) - 1 ) / ( 50 - 1 )
+
+	enter_func_adjusted = ( 1 - enter_func ) * ( demo_ysize / 2 )
+
+	if (cover_xsize > cover_ysize) {
+
+		cover_adjust_factor = demo_xsize / cover_ysize
+
+		x_pos = -corner_x - ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) - demo_xsize / 50
+		y_pos = corner_y  + ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) + demo_xsize / 50 - ( ( demo_ysize / 2 ) - enter_func_adjusted )
+		x_scale = cover_adjust_factor * cover_scale
+		y_scale = cover_adjust_factor * cover_scale
+		
+		pixi( cover_src, x_pos , y_pos, WHITE, x_scale, y_scale, ( ( cover_xsize - cover_ysize ) / 2 ), 0, cover_ysize, cover_ysize )
+
+	} else {
+
+		cover_adjust_factor = demo_xsize / cover_xsize
+
+		x_pos = -corner_x - ( ( cover_xsize * cover_adjust_factor * cover_scale ) / 2 ) - demo_xsize / 50
+		y_pos = corner_y + ( ( cover_xsize * cover_adjust_factor * cover_scale ) / 2 ) + demo_xsize / 50 - ( ( demo_ysize / 2 ) - enter_func_adjusted )
+		x_scale = cover_adjust_factor * cover_scale
+		y_scale = cover_adjust_factor * cover_scale
+	
+		pixi( cover_src, x_pos , y_pos, WHITE, x_scale, y_scale, ( ( cover_ysize - cover_xsize ) / 2 ), 0, cover_xsize, cover_xsize )
+
+	}
+
+}
+
+fn black( $t1 ) {
+
+	exit_point = demo_length - all_exit
+   	rel_time = max($t1, exit_point) - exit_point
+	speed = 255 / (all_exit)
+	trans = min(255 - (rel_time * speed), 255) 
+	transp(255 - trans)
+
+	fbox(corner_x, corner_y, demo_xsize, demo_ysize, BLACK)
+
+}
+
+fn text_render($t1) {
+
+	rel_time = 1 - clip( max( $t1 - ( all_enter + 1000 ) , 0 ) / 1000 )
+
+	enter_func = ( pow( 50, rel_time ) - 1 ) / ( 50 - 1 )
+
+	enter_func_adjusted = ( 1 - enter_func ) * ( demo_ysize / 2 )
+
+	if (cover_xsize > cover_ysize) {
+
+		cover_adjust_factor = demo_xsize / cover_ysize
+
+		x_pos = -corner_x - ( ( cover_ysize * cover_adjust_factor * cover_scale ) ) - demo_xsize / 25
+		y_pos = corner_y  + ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) + demo_xsize / 50 - ( ( demo_ysize / 2 ) - enter_func_adjusted )
+		x_scale = cover_adjust_factor * cover_scale
+		y_scale = cover_adjust_factor * cover_scale
+
+		print( text_title, x_pos , y_pos - ( ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) * text_scale )  , WHITE, TOP | RIGHT )
+		print( text_artist, x_pos , y_pos , WHITE, TOP | RIGHT )
+		print( text_release,  x_pos , y_pos + ( ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) * text_scale ) , WHITE, TOP | RIGHT )
+
+	} else {
+
+		cover_adjust_factor = demo_xsize / cover_xsize
+
+		x_pos = -corner_x - ( ( cover_xsize * cover_adjust_factor * cover_scale ) ) - demo_xsize / 25
+		y_pos = corner_y + ( ( cover_xsize * cover_adjust_factor * cover_scale ) / 2 ) + demo_xsize / 50 - ( ( demo_ysize / 2 ) - enter_func_adjusted )
+		x_scale = cover_adjust_factor * cover_scale
+		y_scale = cover_adjust_factor * cover_scale
+
+		print( text_title, x_pos , y_pos - ( ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) * text_scale )  , WHITE, TOP | RIGHT )
+		print( text_artist, x_pos , y_pos , WHITE, TOP | RIGHT )
+		print( text_release,  x_pos , y_pos + ( ( ( cover_ysize * cover_adjust_factor * cover_scale ) / 2 ) * text_scale ) , WHITE, TOP | RIGHT )
+
+	}
+	
+
+}
+
+fn screen_blur( $t1 ) {
+
+	if (demo_opengl) {
+
+		$prev_screen = get_screen()
+		if temp_img <= 0 { temp_img = new( demo_xsize, demo_ysize, PIXEL ) } else { resize( temp_img, demo_xsize, demo_ysize ) }
+		copy( temp_img, $prev_screen )
+		set_screen( temp_img )
+
+		effector( EFF_VBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_HBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_VBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_HBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_VBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_HBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+
+		set_screen( $prev_screen )
+		update_gl_data( temp_img )
+		pixi( temp_img )
+
+	} else {
+
+		effector( EFF_VBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_HBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_VBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_HBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_VBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+		effector( EFF_HBLUR, ( 1 - ( clip( ( $t1 - all_enter ) / 1000 ) ) ) * 20 , WHITE, corner_x, corner_y, demo_xsize, demo_ysize )
+
+	}
+
+	
+
+}
+
+fn custom_init()
+{
+	gauss( cover_src, cover, cover_blur_rad )
+
+	demo_length = (demo_sound_len / demo_sound_rate) * 1000
+}
+
+fn max($a, $b) {
+	if ($a >= $b) {
+		ret($a)
+	} else {
+		ret($b)
+	}
+}
+
+fn min($a, $b) {
+	if ($a < $b) {
+		ret($a)
+	} else {
+		ret($b)
+	}
+}
+
+fn clip( $a ) {
+	if ($a < 0) { ret( 0 ) }
+	if ($a >= 0) { ret( $a ) }
+	if ($a >= 1) { ret( 1 ) }
+}
+
+fn gauss( $src, $dest, $rad ) {
+
+	sigma = max(($rad / 2), 1)
+
+	kernel_width = (2 * $rad) + 1
+
+	kernel = new(kernel_width, kernel_width, FLOAT)
+
+	sum = 0
+
+	for (x = -$rad ; x <= $rad ; x + 1) {
+	for (y = -$rad ; y <= $rad ; y + 1) {
+		exp_num = -(x * x + y * y)
+		exp_dem = 2 * sigma * sigma
+		expression = pow(M_E, exp_num / exp_dem)
+		ker_val = (expression / (2 * M_PI * sigma * sigma))
+
+		kernel[(x + $rad), (y + $rad)] = ker_val
+		sum = sum + ker_val
+	}
+	}
+
+	FIXED_POINT_MUL = 32768
+	for (x = 0 ; x < kernel_width ; x + 1) {
+		for (y = 0 ; y < kernel_width ; y + 1) {
+			kernel[x, y] = kernel[x, y] / sum * FIXED_POINT_MUL
+		}
+	}
+
+	convert_type( kernel, INT )
+	conv_filter( $dest, $src, kernel, FIXED_POINT_MUL, 0, CONV_FILTER_COLOR )
+}
+
+fn smooth_staircase( $x, $h, $a, $w, $o ) {
+
+	part_1 = ( $a * ( $x - $o ) ) / ( $w )
+	part_2 = ( $a * floor( ( $x - $o ) / $w ) )
+	part_3 = ( $a / 2 )
+	part_4 = tanh( part_1 - part_2 - part_3 )
+	part_5 = ( 2 * tanh( $a / 2 ) )
+	part_6 = ( part_4 / part_5 )
+	whole = ( $h * ( part_6 + ( 1 / 2 ) + floor( ( $x - $o ) / $w ) ) )
+
+	ret( whole )
+}
+
+show_memory_debug_messages( 1 )
